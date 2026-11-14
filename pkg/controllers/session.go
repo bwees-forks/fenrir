@@ -55,7 +55,6 @@ type userGame struct {
 
 type SessionControllerOptions struct {
 	WolfAgentImage    string
-	LBSharingKey      string
 	GamePodScheduling PodScheduling
 }
 
@@ -561,12 +560,6 @@ func (c *SessionController) reconcileService(ctx context.Context, session *v1alp
 		Apply(
 			context.Background(),
 			v1ac.Service(session.Status.ServiceName, session.Namespace).
-				WithAnnotations(map[string]string{
-					// Try to support popular service LoadBalancer implementation
-					// sharing key annotations.
-					"lbipam.cilium.io/sharing-key":        c.LBSharingKey,
-					"metallb.universe.tf/allow-shared-ip": c.LBSharingKey,
-				}).
 				WithLabels(
 					map[string]string{
 						"app":           "direwolf-worker",
@@ -582,7 +575,7 @@ func (c *SessionController) reconcileService(ctx context.Context, session *v1alp
 					WithController(true)).
 				WithSpec(
 					v1ac.ServiceSpec().
-						WithType(corev1.ServiceTypeLoadBalancer).
+						WithType(corev1.ServiceTypeClusterIP).
 						WithSelector(
 							map[string]string{
 								"direwolf/app":  session.Spec.GameReference.Name,
@@ -830,6 +823,7 @@ func (c *SessionController) reconcilePod(ctx context.Context, session *v1alpha1t
 	podToCreate.Labels["app"] = "direwolf-worker"
 	podToCreate.Labels["direwolf/app"] = session.Spec.GameReference.Name
 	podToCreate.Labels["direwolf/user"] = session.Spec.UserReference.Name
+	podToCreate.Labels[StreamLabel] = StreamLabelValue
 
 	// if podToCreate.Spec.SecurityContext == nil {
 	// 	podToCreate.Spec.SecurityContext = &corev1.PodSecurityContext{}
@@ -1163,14 +1157,17 @@ func (c *SessionController) reconcilePod(ctx context.Context, session *v1alpha1t
 				{
 					Name:          "enet",
 					ContainerPort: session.Status.Ports.Control,
+					Protocol:      corev1.ProtocolUDP,
 				},
 				{
 					Name:          "video",
 					ContainerPort: session.Status.Ports.VideoRTP,
+					Protocol:      corev1.ProtocolUDP,
 				},
 				{
 					Name:          "audio",
 					ContainerPort: session.Status.Ports.AudioRTP,
+					Protocol:      corev1.ProtocolUDP,
 				},
 			},
 			Resources:       wolfResources,

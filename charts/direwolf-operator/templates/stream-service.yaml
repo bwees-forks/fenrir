@@ -1,0 +1,61 @@
+{{- with .Values.streamService }}
+{{- $externallyReachable := or (ne .type "ClusterIP") (not (empty .externalIPs)) }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "bjw-s.common.lib.chart.names.fullname" $ }}-stream
+  namespace: {{ $.Release.Namespace }}
+  {{- with .labels }}
+  labels:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  {{- with .annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .type }}
+  {{- with .loadBalancerClass }}
+  loadBalancerClass: {{ . }}
+  {{- end }}
+  {{- with .loadBalancerIP }}
+  loadBalancerIP: {{ . }}
+  {{- end }}
+  {{- with .externalIPs }}
+  externalIPs:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  {{- if and $externallyReachable .externalTrafficPolicy }}
+  externalTrafficPolicy: {{ .externalTrafficPolicy }}
+  {{- end }}
+  selector:
+    direwolf.games-on-whales.github.io/stream: "true"
+  ports:
+    # Pairing and app list, served by moonlight-proxy
+    - name: http
+      port: 47989
+      targetPort: moonlight-http
+      protocol: TCP
+    - name: https
+      port: 47984
+      targetPort: moonlight-https
+      protocol: TCP
+    # Streaming, served by wolf in the active game pod
+    - name: rtsp
+      port: 48010
+      targetPort: rtsp
+      protocol: TCP
+    - name: enet
+      port: 47999
+      targetPort: enet
+      protocol: UDP
+    - name: video
+      port: 48100
+      targetPort: video
+      protocol: UDP
+    - name: audio
+      port: 48200
+      targetPort: audio
+      protocol: UDP
+{{- end }}

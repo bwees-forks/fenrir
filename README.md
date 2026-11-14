@@ -133,15 +133,29 @@ support additional ports.
 
 #### Load Balancer Service
 
-The current method used by this POC is to use a special LoadBalancer feature
-of Cilium to implement the port forwards. The basic idea is that one set of ports
-(HTTP/HTTPS) go to `moonlight-proxy`, and the other set `RTSP/RTP/ENET` go to `wolf`
-running alongside the game. This allows us to have a single `moonlight-proxy`
-serving many sessions hosted by many whales.
+The Helm chart creates one `direwolf-stream` Service with every Moonlight port.
+HTTP/HTTPS go to `moonlight-proxy`, RTSP/RTP/ENET go to `wolf` in the active game
+pod. Both carry the `direwolf.games-on-whales.github.io/stream: "true"` label, and
+named target ports send each port to the right pod.
 
-When a `Session` is created, `Operator` will choose a set of RTSP/RTP/ENET ports
-to use, and create a `Service` pointed at `wolf` for them with a special cilium
-annotation `lb-sharing-key` to enable sharing of the same IP used for moonlight.
+Expose it however your cluster does, through `streamService` in the Helm values:
+
+```yaml
+streamService:
+  type: LoadBalancer            # or ClusterIP with externalIPs only
+  externalTrafficPolicy: Local  # Wolf needs the real client IP
+  annotations:
+    metallb.io/loadBalancerIPs: 192.168.1.50
+  loadBalancerClass: ""
+  externalIPs:
+    - 100.100.10.10             # e.g. a Tailscale Service VIP routed to the game node
+```
+
+With `Local`, pin `moonlight-proxy` to the game node
+(`controllers.moonlight_proxy.pod.nodeSelector`) so every port has a local pod.
+
+The operator still creates a per-session `ClusterIP` Service for in-cluster
+access to `wolf-agent`.
 
 #### Alternative Design Idea: Gateway API
 

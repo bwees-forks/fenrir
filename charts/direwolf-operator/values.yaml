@@ -11,6 +11,20 @@ gamePods:
   tolerations: []
   affinity: {}
 
+# Every Moonlight port on one Service: pairing reaches moonlight-proxy,
+# streaming reaches the active game pod. Works with any LoadBalancer
+# implementation and/or externalIPs.
+streamService:
+  type: LoadBalancer
+  # Wolf matches streams by client IP. With Local, also pin moonlight-proxy to
+  # the game node via controllers.moonlight_proxy.pod.nodeSelector.
+  externalTrafficPolicy: Local
+  annotations: {}
+  labels: {}
+  loadBalancerClass: ""
+  loadBalancerIP: ""
+  externalIPs: []
+
 serviceAccount:
   direwolf_operator:
     forceRename: &operatorName direwolf-operator
@@ -73,11 +87,21 @@ controllers:
     forceRename: *proxyName
     serviceAccount:
       identifier: &proxyId moonlight_proxy
+    pod:
+      labels:
+        direwolf.games-on-whales.github.io/stream: "true"
     containers:
       proxy:
         args:
           - --tls-cert=/etc/certs/tls.crt
           - --tls-key=/etc/certs/tls.key
+        ports:
+          - name: moonlight-http
+            containerPort: 47989
+            protocol: TCP
+          - name: moonlight-https
+            containerPort: 47984
+            protocol: TCP
         image:
           repository: ghcr.io/games-on-whales/fenrir/moonlight-proxy
           tag: main
@@ -99,20 +123,6 @@ controllers:
           limits:
             cpu: 250m
             memory: 256Mi
-service:
-  app:
-    controller: moonlight_proxy
-    type: LoadBalancer
-    annotations:
-      lbipam.cilium.io/sharing-key: direwolf
-      "metallb.universe.tf/allow-shared-ip": "direwolf"
-    ports:
-      http:
-        protocol: TCP
-        port: 47984
-      https:
-        protocol: TCP
-        port: 47989
 persistence:
   tls-cert:
     type: secret

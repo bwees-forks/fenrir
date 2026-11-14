@@ -31,7 +31,6 @@ func main() {
 	wolfAgentImage := flag.String("wolf-agent-image", im, "Wolf Agent image")
 	holderIdentity := flag.String("holder-identity", os.Getenv("POD_NAME"), "Holder identity")
 	namespace := flag.String("namespace", os.Getenv("POD_NAMESPACE"), "Namespace to watch")
-	lbSharingKey := flag.String("lb-sharing-key", os.Getenv("POD_NAMESPACE"), "LoadBalancer sharing key")
 	gamePodSchedulingRaw := flag.String("game-pod-scheduling", os.Getenv("GAME_POD_SCHEDULING"),
 		"JSON or YAML with nodeSelector, tolerations and affinity applied to every game pod")
 	klog.InitFlags(nil)
@@ -93,7 +92,6 @@ func main() {
 		generic.NewInformer[*appsv1.Deployment](deploymentInformer),
 		controllers.SessionControllerOptions{
 			WolfAgentImage:    *wolfAgentImage,
-			LBSharingKey:      *lbSharingKey,
 			GamePodScheduling: gamePodScheduling,
 		},
 	)
