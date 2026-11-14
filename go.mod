@@ -6,7 +6,7 @@ require (
 	github.com/google/go-cmp v0.7.0
 	github.com/r3labs/sse/v2 v2.10.0
 	github.com/stretchr/testify v1.10.0
-	golang.org/x/image v0.24.0
+	golang.org/x/image v0.41.0
 	golang.org/x/sys v0.45.0
 	golang.org/x/time v0.7.0
 	k8s.io/api v0.33.0-alpha.3
