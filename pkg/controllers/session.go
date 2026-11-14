@@ -48,6 +48,10 @@ var (
 	}()
 )
 
+// A stalled wolf-agent call must fail so the session requeues instead of
+// blocking its reconcile forever.
+const wolfAgentRequestTimeout = 10 * time.Second
+
 type userGame struct {
 	User string
 	Game string
@@ -1570,6 +1574,7 @@ func (c *SessionController) reconcileActiveStreams(
 	// In the future it might make sense to just match on ClientID/ClientCertFingerprint
 	// but that is hardcoded for now :)
 	wolfclient := wolfapi.NewClient(fmt.Sprintf("https://%s:8443", service.Spec.ClusterIP), &http.Client{
+		Timeout: wolfAgentRequestTimeout,
 		Transport: &http.Transport{
 			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
 		},
