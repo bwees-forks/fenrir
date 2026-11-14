@@ -13,7 +13,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"sync"
+	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/klog/v2"
@@ -25,12 +27,18 @@ import (
 	metav1apply "k8s.io/client-go/applyconfigurations/meta/v1"
 )
 
-func hardcodedPin() (string, bool) {
-	val, ok := os.LookupEnv("HARDCODED_PIN")
+// PinSubmission is what the PIN page sends for a waiting pair request.
+type PinSubmission struct {
+	Pin      string
+	Username string
+}
+
+func hardcodedPin() (PinSubmission, bool) {
+	pin, ok := os.LookupEnv("HARDCODED_PIN")
 	if !ok {
-		return "", false
+		return PinSubmission{}, false
 	}
-	return val, true
+	return PinSubmission{Pin: pin, Username: os.Getenv("HARDCODED_USER")}, true
 }
 
 type PairingResponse struct {
@@ -59,10 +67,8 @@ type PairingManager struct {
 	// value: pendingPairCacheEntry
 	PairingCache sync.Map // Go's equivalent of an immer::map for thread safety
 
-	// Map of pairing secret to <-chan string for pin code where a request is
-	// pending
 	// key: randomly generated ephemeral secret for /pair request
-	// value: channel to send pin code
+	// value: pendingPin
 	PendingPins sync.Map
 
 	// Certificate of the secure serving endpoint used for pairing
@@ -86,19 +92,54 @@ func failPair(statusMsg string) PairingResponse {
 	return PairingResponse{Paired: 0, Response: Response{StatusCode: 400, StatusMessage: statusMsg}}
 }
 
-func (m *PairingManager) PostPin(secret string, pin string) error {
-	channel, found := m.PendingPins.Load(secret)
-	if !found {
+type pendingPin struct {
+	pins        chan PinSubmission
+	clientIP    string
+	requestedAt time.Time
+}
+
+type PendingPinRequest struct {
+	Secret      string    `json:"secret"`
+	ClientIP    string    `json:"clientIP"`
+	RequestedAt time.Time `json:"requestedAt"`
+}
+
+// PendingPinRequests lists clients waiting for a PIN, oldest first.
+func (m *PairingManager) PendingPinRequests() []PendingPinRequest {
+	requests := []PendingPinRequest{}
+	m.PendingPins.Range(func(key, value any) bool {
+		secret, isSecret := key.(string)
+		pending, isPending := value.(pendingPin)
+		if !isSecret || !isPending {
+			return true
+		}
+		requests = append(requests, PendingPinRequest{
+			Secret:      secret,
+			ClientIP:    pending.clientIP,
+			RequestedAt: pending.requestedAt,
+		})
+		return true
+	})
+	slices.SortFunc(requests, func(a, b PendingPinRequest) int {
+		return a.RequestedAt.Compare(b.RequestedAt)
+	})
+	return requests
+}
+
+func (m *PairingManager) PostPin(secret string, submission PinSubmission) error {
+	value, found := m.PendingPins.Load(secret)
+	pending, isPending := value.(pendingPin)
+	if !found || !isPending {
 		err := fmt.Errorf("no pending pin for secret %s", secret)
 		return err
 	}
 
 	select {
-	case channel.(chan string) <- pin:
-		klog.Infof("Sent pin %s to channel for secret %s", pin, secret)
+	case pending.pins <- submission:
+		klog.Infof("Sent pin for user %s to channel for secret %s", submission.Username, secret)
 		return nil
 	default:
-		err := fmt.Errorf("failed to send pin %s to channel for secret %s. Either full buffer or closed channel", pin, secret)
+		err := fmt.Errorf("failed to send pin to channel for secret %s. Either full buffer or closed channel", secret)
 		return err
 	}
 }
@@ -119,7 +160,7 @@ func (m *PairingManager) Unpair(cacheKey string) error {
  *
  * At this stage we only have to send back our public certificate (`plaincert`).
  */
-func (m *PairingManager) pairPhase1(cacheKey string, salt string, clientCertStr string) PairingResponse {
+func (m *PairingManager) pairPhase1(cacheKey string, clientIP string, pinPageURL string, salt string, clientCertStr string) PairingResponse {
 	// Check if pairing session exists
 	if _, found := m.PairingCache.Load(cacheKey); found {
 		m.PairingCache.Delete(cacheKey)
@@ -150,21 +191,24 @@ func (m *PairingManager) pairPhase1(cacheKey string, salt string, clientCertStr 
 	pinSecretHex := hex.EncodeToString(pinSecret)
 
 	// Store the pin secret
-	pinChannel := make(chan string, 1)
+	pinChannel := make(chan PinSubmission, 1)
 	defer close(pinChannel)
 	defer m.PendingPins.Delete(pinSecretHex)
-	m.PendingPins.Store(pinSecretHex, pinChannel)
+	m.PendingPins.Store(pinSecretHex, pendingPin{
+		pins:        pinChannel,
+		clientIP:    clientIP,
+		requestedAt: time.Now(),
+	})
 
-	//!TODO: Get proper hostname
-	klog.Infof("Insert pin at http://%s/pin/#%s", "127.0.0.1:47989", pinSecretHex)
+	klog.Infof("Insert pin at %s#%s", pinPageURL, pinSecretHex)
 
 	// Hardcoded pin for testing in debug builds if debugger is attached
-	var pin string
+	var submission PinSubmission
 	if hardcoded, ok := hardcodedPin(); ok {
 		klog.Infof("Debugger attached, using hardcoded pin")
-		pin = hardcoded
+		submission = hardcoded
 	} else {
-		pin = <-pinChannel
+		submission = <-pinChannel
 	}
 
 	// Generate server cert and AES key
@@ -172,8 +216,8 @@ func (m *PairingManager) pairPhase1(cacheKey string, salt string, clientCertStr 
 	m.PairingCache.Store(cacheKey, pendingPairCacheEntry{
 		ClientCert: clientCert,
 		LastPhase:  "GETSERVERCERT",
-		Username:   "alex", // TODO: TEMPORARY: We should serve the PIN auth page under authenticated SSL to get username
-		AESKey:     util.Hash(saltData[:16], []byte(pin))[:16],
+		Username:   submission.Username,
+		AESKey:     util.Hash(saltData[:16], []byte(submission.Pin))[:16],
 	})
 
 	// Send hex encoded server cert pem

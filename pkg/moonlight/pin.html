@@ -41,13 +41,45 @@
         input[type=number] {
             -moz-appearance: textfield;
         }
+
+        .pending {
+            color: white;
+            text-align: center;
+        }
+
+        .user {
+            display: block;
+            margin-bottom: 1rem;
+            color: white;
+            text-align: center;
+            font-size: 1.5rem;
+        }
+
+        .user[hidden], form[hidden] {
+            display: none;
+        }
+
+        .user select {
+            font-size: 1.5rem;
+        }
+
+        .pending a {
+            display: block;
+            margin: 0.5rem;
+            color: white;
+        }
     </style>
 </head>
 <body>
 
 
 <div>
-    <form class="form">
+    <div class="pending" hidden></div>
+    <label class="user" hidden>
+        Pair as
+        <select></select>
+    </label>
+    <form class="form" hidden>
         <input type="number" min="0" max="9" step="1"/>
         <input type="number" min="0" max="9" step="1"/>
         <input type="number" min="0" max="9" step="1"/>
@@ -60,6 +92,63 @@
 <script type="application/javascript">
     const inputs = document.querySelectorAll("input");
     const form = document.querySelector(".form");
+    const pending = document.querySelector(".pending");
+    const userPicker = document.querySelector(".user");
+    const userSelect = userPicker.querySelector("select");
+
+    function showPinForm() {
+        fetch("/pin/users")
+            .then((response) => response.json())
+            .then((users) => {
+                if (users.length === 0) {
+                    pending.hidden = false;
+                    pending.textContent = "No users exist yet. Create a User resource, then reload this page.";
+                    return;
+                }
+                users.forEach((user) => userSelect.add(new Option(user, user)));
+                pending.hidden = true;
+                userPicker.hidden = false;
+                form.hidden = false;
+                inputs[0].focus();
+            })
+            .catch((err) => {
+                pending.hidden = false;
+                pending.textContent = "Failed to load users: " + err;
+            });
+    }
+
+    function showPendingRequests(requests) {
+        pending.hidden = false;
+        if (requests.length === 0) {
+            pending.textContent = "No pending pairing requests. Start pairing in Moonlight, then reload this page.";
+            return;
+        }
+        pending.textContent = "Pick the client you are pairing:";
+        requests.forEach((request) => {
+            const link = document.createElement("a");
+            link.href = "#" + request.secret;
+            link.textContent = request.clientIP + " (" + new Date(request.requestedAt).toLocaleTimeString() + ")";
+            link.addEventListener("click", () => setTimeout(showPinForm));
+            pending.appendChild(link);
+        });
+    }
+
+    function loadPendingRequests() {
+        fetch("/pin/pending")
+            .then((response) => response.json())
+            .then((requests) => {
+                if (requests.length === 1) {
+                    window.location.hash = requests[0].secret;
+                    showPinForm();
+                    return;
+                }
+                showPendingRequests(requests);
+            })
+            .catch((err) => {
+                pending.hidden = false;
+                pending.textContent = "Failed to load pending pairing requests: " + err;
+            });
+    }
 
     function send(pin) {
         let xhr = new XMLHttpRequest();
@@ -72,8 +161,10 @@
         };
         const data = JSON.stringify({
             "pin": pin,
-            "secret": window.location.hash.substring(1)
+            "secret": window.location.hash.substring(1),
+            "user": userSelect.value
         });
+        userPicker.hidden = true;
         form.textContent = "Sending " + pin + " ...";
         xhr.send(data);
     }
@@ -94,6 +185,10 @@
             }
         });
     });
-    inputs[0].focus();
+    if (window.location.hash.length > 1) {
+        showPinForm();
+    } else {
+        loadPendingRequests();
+    }
 </script>
 </html>

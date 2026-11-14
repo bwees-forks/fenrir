@@ -13,6 +13,7 @@ import (
 	"image/png"
 	"io"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -99,6 +100,8 @@ func NewRESTServer(
 	ps.router.HandleFunc("/pair", ps.pairHandler)
 	ps.router.HandleFunc("/unpair", ps.unpairHandler)
 	ps.router.HandleFunc("/pin/", ps.pinHandler)
+	ps.router.HandleFunc("/pin/pending", ps.pendingPinsHandler)
+	ps.router.HandleFunc("/pin/users", ps.pinUsersHandler)
 
 	ps.router.HandleFunc("/readyz", ps.readyzHandler)
 	ps.router.HandleFunc("/livez", ps.livezHandler)
@@ -262,7 +265,8 @@ func (s *RESTServer) pairHandler(w http.ResponseWriter, r *http.Request) {
 		salt := r.URL.Query().Get("salt")
 		clientCertStr := r.URL.Query().Get("clientcert")
 
-		sendXML(w, s.manager.pairPhase1(cacheKey, salt, clientCertStr))
+		pinPageURL := fmt.Sprintf("http://%s/pin/", r.Host)
+		sendXML(w, s.manager.pairPhase1(cacheKey, clientIP, pinPageURL, salt, clientCertStr))
 		return
 	} else if r.URL.Query().Has("clientchallenge") {
 		klog.Infof("Pairing phase 2 with %s\n", cacheKey)
@@ -326,7 +330,8 @@ func (s *RESTServer) pinHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method == "POST" {
 		type PinRequest struct {
 			Pin    string `json:"pin"`
-			Secret string `secret:"secret"`
+			Secret string `json:"secret"`
+			User   string `json:"user"`
 		}
 
 		var req PinRequest
@@ -336,15 +341,22 @@ func (s *RESTServer) pinHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		if req.Pin == "" || req.Secret == "" {
+		if req.Pin == "" || req.Secret == "" || req.User == "" {
 			w.WriteHeader(http.StatusBadRequest)
 			w.Write([]byte("Invalid request"))
 			return
 		}
 
-		// Provide the pin to the pair manager
-		klog.Infof("Received pin %s for secret %s", req.Pin, req.Secret)
-		err := s.manager.PostPin(req.Secret, req.Pin)
+		if _, err := s.UserLister.Get(req.User); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			if _, err := fmt.Fprintf(w, "Unknown user %s", req.User); err != nil {
+				klog.Errorf("failed to write response: %s", err)
+			}
+			return
+		}
+
+		klog.Infof("Received pin for user %s and secret %s", req.User, req.Secret)
+		err := s.manager.PostPin(req.Secret, PinSubmission{Pin: req.Pin, Username: req.User})
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
 			w.Write([]byte(err.Error()))
@@ -357,6 +369,43 @@ func (s *RESTServer) pinHandler(w http.ResponseWriter, r *http.Request) {
 
 	w.WriteHeader(http.StatusBadRequest)
 	w.Write([]byte("Invalid pin request"))
+}
+
+func (s *RESTServer) pendingPinsHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(s.manager.PendingPinRequests()); err != nil {
+		klog.Errorf("failed to encode pending pin requests: %s", err)
+	}
+}
+
+func (s *RESTServer) pinUsersHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+
+	users, err := s.UserLister.List(labels.Everything())
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(err.Error()))
+		return
+	}
+
+	usernames := make([]string, 0, len(users))
+	for _, user := range users {
+		usernames = append(usernames, user.Name)
+	}
+	slices.Sort(usernames)
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(usernames); err != nil {
+		klog.Errorf("failed to encode users: %s", err)
+	}
 }
 
 func (s *RESTServer) appListHandler(w http.ResponseWriter, r *http.Request) {
