@@ -38,8 +38,16 @@ type Runner struct {
 	RunCmd string `json:"run_cmd,omitempty"`
 }
 
+type ControllerType string
+
+const (
+	ControllerTypeXbox ControllerType = "XBOX"
+	ControllerTypeAuto ControllerType = "AUTO"
+)
+
 type ClientSettings struct {
-	ControllersOverride []string `json:"controllers_override"`
+	ControllersOverride      []ControllerType `json:"controllers_override"`
+	MotionControllerOverride ControllerType   `json:"motion_controller_override"`
 	//!TODO Float is lossy type. Possible to use decimal?
 	HScrollAcceleration float64 `json:"h_scroll_acceleration"`
 	MouseAcceleration   float64 `json:"mouse_acceleration"`
