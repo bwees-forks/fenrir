@@ -882,21 +882,12 @@ func (c *SessionController) reconcilePod(ctx context.Context, session *v1alpha1t
 			// PULSE_SINK & PULSE_SOURCE set at runtime calculated based off session ID.
 			// But would be nice if unnecessary
 
-			// Assorted NVIDIA. Unsure if required. Probabky not.
-			// just gonna uncomment to make sure that this is not the reason firefox keeps crashing and failing to play videos.
-			// yeah now no audio, probably because i'm developing on an integrated amd gpu.
-			{Name: "LIBVA_DRIVER_NAME", Value: "nvidia"},
-			{Name: "LD_LIBRARY_PATH", Value: "/usr/local/nvidia/lib:/usr/local/nvidia/lib64:/usr/local/lib"},
-			{Name: "NVIDIA_DRIVER_CAPABILITIES", Value: "all"},
-			{Name: "NVIDIA_VISIBLE_DEVICES", Value: "all"},
-			{Name: "GST_VAAPI_ALL_DRIVERS", Value: "1"},
-			{Name: "GST_DEBUG", Value: "2"},
-
 			// Gamescape envar injection. Ham-handed. Why not.
 			{Name: "GAMESCOPE_WIDTH", Value: fmt.Sprint(session.Spec.Config.VideoWidth)},
 			{Name: "GAMESCOPE_HEIGHT", Value: fmt.Sprint(session.Spec.Config.VideoHeight)},
 			{Name: "GAMESCOPE_REFRESH", Value: fmt.Sprint(session.Spec.Config.VideoRefreshRate)},
 		}...)
+		podToCreate.Spec.Containers[i].Env = withDefaultEnv(podToCreate.Spec.Containers[i].Env, gpuDefaultEnv)
 
 		// Validate the main app container's resources against the user's policy.
 		validatedResources, err := validateAppResources(podToCreate.Spec.Containers[i].Resources, user.Spec.Resources)
