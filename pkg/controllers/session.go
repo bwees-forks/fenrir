@@ -259,6 +259,14 @@ func (c *SessionController) Reconcile(namespace, name string, newObj *v1alpha1ty
 	// found" while iterating the stale names.
 	c.trackedGames[newObj.Name] = ug
 
+	exited, err := c.hasGameExited(context.TODO(), newObj)
+	if err != nil {
+		return err
+	}
+	if exited {
+		return c.tearDownGame(context.TODO(), newObj, ug)
+	}
+
 	oldStatus := newObj.Status.DeepCopy()
 	portsError := c.allocatePorts(context.TODO(), newObj)
 

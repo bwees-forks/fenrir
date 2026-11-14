@@ -166,6 +166,9 @@ rbac:
         - apiGroups: [""]
           resources: ["services", "persistentvolumeclaims", "configmaps"]
           verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+        - apiGroups: [""]
+          resources: ["pods"]
+          verbs: ["get", "list", "watch"]
     moonlight_proxy:
       forceRename: *proxyName
       type: Role
