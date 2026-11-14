@@ -770,9 +770,6 @@ func (c *SessionController) reconcilePod(ctx context.Context, session *v1alpha1t
 	// I need a better method of injecting env vars / configs to the pod
 	// TODO
 	wolfEnvVars := map[string]string{
-		"PUID":                   "1000",
-		"PGID":                   "1000",
-		"UNAME":                  "ubuntu",
 		"XDG_RUNTIME_DIR":        "/tmp/.X11-unix",
 		"PULSE_SERVER":           "unix:/tmp/.X11-unix/pulse-socket",
 		"HOST_APPS_STATE_FOLDER": "/mnt/data/wolf",
