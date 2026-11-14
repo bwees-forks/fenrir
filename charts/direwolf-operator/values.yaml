@@ -4,6 +4,13 @@
 global:
   fullnameOverride: direwolf
 
+# Placement for every game pod the operator creates. An App's pod template
+# overrides these per key.
+gamePods:
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
 serviceAccount:
   direwolf_operator:
     forceRename: &operatorName direwolf-operator
@@ -50,6 +57,7 @@ controllers:
           POD_NAMESPACE: "{{ .Release.Namespace }}"
           WOLF_IMAGE: ghcr.io/games-on-whales/wolf:stable
           AGENT_IMAGE: ghcr.io/games-on-whales/fenrir/wolf-agent:main
+          GAME_POD_SCHEDULING: "{{ toJson .Values.gamePods }}"
         securityContext:
           allowPrivilegeEscalation: false
           readOnlyRootFilesystem: true

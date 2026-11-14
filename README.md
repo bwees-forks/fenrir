@@ -102,6 +102,29 @@ User's Game Container MUST have a pre-launch script that waits for the `WAYLAND_
 socket to be created, otherwise the container will be in a crashloop, and the
 Pod will never be `READY` for the `Service` to forward traffic to it.
 
+### Game Pod Scheduling
+
+To keep game pods on specific nodes (e.g. the GPU node), set `gamePods` in the
+Helm values:
+
+```yaml
+gamePods:
+  nodeSelector:
+    direwolf.games-on-whales.github.io/gpu: "true"
+  tolerations:
+    - key: nvidia.com/gpu
+      operator: Exists
+      effect: NoSchedule
+  affinity: {}
+```
+
+Label the node with `kubectl label node <node> direwolf.games-on-whales.github.io/gpu=true`.
+
+The chart passes this to the operator as `GAME_POD_SCHEDULING` (or
+`--game-pod-scheduling`), JSON or YAML. An App's `template.spec` takes
+precedence: its `nodeSelector` keys win, its tolerations are kept, and its
+`affinity` replaces the default.
+
 ### Port Forwarding
 
 Port forwarding to the container is the lynchpin of this POC. And it actually

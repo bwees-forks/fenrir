@@ -54,8 +54,9 @@ type userGame struct {
 }
 
 type SessionControllerOptions struct {
-	WolfAgentImage string
-	LBSharingKey   string
+	WolfAgentImage    string
+	LBSharingKey      string
+	GamePodScheduling PodScheduling
 }
 
 // Session Controller manages the lifecycle of a streaming session for
@@ -1036,6 +1037,7 @@ func (c *SessionController) reconcilePod(ctx context.Context, session *v1alpha1t
 
 	// Apply HostIPC setting to the pod spec if requested by any sidecar policy
 	podToCreate.Spec.HostIPC = podHostIPC
+	c.GamePodScheduling.ApplyTo(&podToCreate.Spec)
 
 	podToCreate.Spec.Containers = append(podToCreate.Spec.Containers,
 		corev1.Container{
