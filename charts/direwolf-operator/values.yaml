@@ -11,6 +11,19 @@ gamePods:
   tolerations: []
   affinity: {}
 
+# Sidecar images for every game pod. Pin tags to digests (tag@sha256:...) so
+# nodes reuse cached images and Renovate can bump them.
+gameImages:
+  wolf:
+    repository: ghcr.io/games-on-whales/wolf
+    tag: stable
+  pulseaudio:
+    repository: ghcr.io/games-on-whales/pulseaudio
+    tag: edge
+  init:
+    repository: ghcr.io/games-on-whales/base
+    tag: edge
+
 # Every Moonlight port on one Service: pairing reaches moonlight-proxy,
 # streaming reaches the active game pod. Works with any LoadBalancer
 # implementation and/or externalIPs.
@@ -69,7 +82,9 @@ controllers:
               fieldRef:
                 fieldPath: metadata.name
           POD_NAMESPACE: "{{ .Release.Namespace }}"
-          WOLF_IMAGE: ghcr.io/games-on-whales/wolf:stable
+          WOLF_IMAGE: "{{ .Values.gameImages.wolf.repository }}:{{ .Values.gameImages.wolf.tag }}"
+          PULSEAUDIO_IMAGE: "{{ .Values.gameImages.pulseaudio.repository }}:{{ .Values.gameImages.pulseaudio.tag }}"
+          GAME_INIT_IMAGE: "{{ .Values.gameImages.init.repository }}:{{ .Values.gameImages.init.tag }}"
           AGENT_IMAGE: ghcr.io/games-on-whales/fenrir/wolf-agent:main
           GAME_POD_SCHEDULING: "{{ toJson .Values.gamePods }}"
         securityContext:

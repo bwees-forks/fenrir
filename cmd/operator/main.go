@@ -20,15 +20,30 @@ import (
 	"k8s.io/klog/v2"
 )
 
+const (
+	defaultWolfAgentImage  = "ghcr.io/games-on-whales/wolf-agent:main"
+	defaultWolfImage       = "ghcr.io/games-on-whales/wolf:stable"
+	defaultPulseAudioImage = "ghcr.io/games-on-whales/pulseaudio:edge"
+	defaultGameInitImage   = "ghcr.io/games-on-whales/base:edge"
+)
+
+func envOr(name, fallback string) string {
+	if value := os.Getenv(name); value != "" {
+		return value
+	}
+	return fallback
+}
+
 func main() {
 	appContext, appCancel := context.WithCancel(context.Background())
 	defer appCancel()
 
-	im := os.Getenv("AGENT_IMAGE")
-	if im == "" {
-		im = "ghcr.io/games-on-whales/wolf-agent:main"
-	}
-	wolfAgentImage := flag.String("wolf-agent-image", im, "Wolf Agent image")
+	wolfAgentImage := flag.String("wolf-agent-image", envOr("AGENT_IMAGE", defaultWolfAgentImage), "Wolf Agent image")
+	wolfImage := flag.String("wolf-image", envOr("WOLF_IMAGE", defaultWolfImage), "Wolf image for game pods")
+	pulseAudioImage := flag.String("pulseaudio-image", envOr("PULSEAUDIO_IMAGE", defaultPulseAudioImage),
+		"PulseAudio image for game pods")
+	initImage := flag.String("game-init-image", envOr("GAME_INIT_IMAGE", defaultGameInitImage),
+		"Init container image for game pods")
 	holderIdentity := flag.String("holder-identity", os.Getenv("POD_NAME"), "Holder identity")
 	namespace := flag.String("namespace", os.Getenv("POD_NAMESPACE"), "Namespace to watch")
 	gamePodSchedulingRaw := flag.String("game-pod-scheduling", os.Getenv("GAME_POD_SCHEDULING"),
@@ -92,6 +107,9 @@ func main() {
 		generic.NewInformer[*appsv1.Deployment](deploymentInformer),
 		controllers.SessionControllerOptions{
 			WolfAgentImage:    *wolfAgentImage,
+			WolfImage:         *wolfImage,
+			PulseAudioImage:   *pulseAudioImage,
+			InitImage:         *initImage,
 			GamePodScheduling: gamePodScheduling,
 		},
 	)

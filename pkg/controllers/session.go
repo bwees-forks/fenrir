@@ -6,7 +6,6 @@ import (
 	"crypto/tls"
 	"fmt"
 	"net/http"
-	"os"
 	"reflect"
 	"time"
 
@@ -38,16 +37,6 @@ import (
 	gatewayv1alpha2 "sigs.k8s.io/gateway-api/pkg/client/clientset/versioned/typed/apis/v1alpha2"
 )
 
-var (
-	WOLF_IMAGE = func() string {
-		if im := os.Getenv("WOLF_IMAGE"); im != "" {
-			return im
-		}
-
-		return "ghcr.io/games-on-whales/wolf:stable"
-	}()
-)
-
 // A stalled wolf-agent call must fail so the session requeues instead of
 // blocking its reconcile forever.
 const wolfAgentRequestTimeout = 10 * time.Second
@@ -59,6 +48,9 @@ type userGame struct {
 
 type SessionControllerOptions struct {
 	WolfAgentImage    string
+	WolfImage         string
+	PulseAudioImage   string
+	InitImage         string
 	GamePodScheduling PodScheduling
 }
 
@@ -896,7 +888,7 @@ func (c *SessionController) reconcilePod(ctx context.Context, session *v1alpha1t
 	podToCreate.Spec.InitContainers = append(podToCreate.Spec.InitContainers,
 		corev1.Container{
 			Name:  "init",
-			Image: "ghcr.io/games-on-whales/base:edge",
+			Image: c.InitImage,
 			// This will need to be updated / removed since /etc/wolf/cfg is no longer used by wolf
 			// Also, we're no longer injecting the app info into the config.toml
 			Command: []string{
@@ -1030,8 +1022,6 @@ func (c *SessionController) reconcilePod(ctx context.Context, session *v1alpha1t
 		corev1.Container{
 			Name:  "wolf-agent",
 			Image: c.WolfAgentImage,
-			ImagePullPolicy: corev1.PullAlways,
-			// ImagePullPolicy: corev1.PullIfNotPresent,
 			Args: []string{
 				"--socket=/etc/wolf/wolf.sock",
 				"--port=8443",
@@ -1118,7 +1108,7 @@ func (c *SessionController) reconcilePod(ctx context.Context, session *v1alpha1t
 		},
 		corev1.Container{
 			Name:  "pulseaudio",
-			Image: "ghcr.io/games-on-whales/pulseaudio:edge",
+			Image: c.PulseAudioImage,
 			Env: append([]corev1.EnvVar{
 				{Name: "TZ", Value: wolfEnvVars["TZ"]},
 				{Name: "UNAME", Value: "retro"},
@@ -1138,7 +1128,7 @@ func (c *SessionController) reconcilePod(ctx context.Context, session *v1alpha1t
 		},
 		corev1.Container{
 			Name:  "wolf",
-			Image: WOLF_IMAGE,
+			Image: c.WolfImage,
 			Env:   append(wolfEnvVarsSlice, wolfEnv...),
 			// Note: Container Ports list is strictly informational. As long
 			// as process is listening on 0.0.0.0 it can be bound by a service.
