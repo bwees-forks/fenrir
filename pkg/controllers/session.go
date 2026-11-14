@@ -855,6 +855,7 @@ func (c *SessionController) reconcilePod(ctx context.Context, session *v1alpha1t
 
 	// Inject volume mounts into existing containers
 	for i := range podToCreate.Spec.Containers {
+		podToCreate.Spec.Containers[i].VolumeMounts = withUdevMount(podToCreate.Spec.Containers[i].VolumeMounts)
 		podToCreate.Spec.Containers[i].VolumeMounts = append(podToCreate.Spec.Containers[i].VolumeMounts,
 			corev1.VolumeMount{
 				Name:      "wolf-runtime",
@@ -1117,8 +1118,8 @@ func (c *SessionController) reconcilePod(ctx context.Context, session *v1alpha1t
 				},
 			},
 			Resources:       wolfAgentResources,
-			SecurityContext: wolfAgentSecurityContext,
-			VolumeMounts: append([]corev1.VolumeMount{
+			SecurityContext: withNetAdmin(wolfAgentSecurityContext),
+			VolumeMounts: withUdevMount(append([]corev1.VolumeMount{
 				{
 					Name:      "wolf-cfg",
 					MountPath: "/etc/wolf",
@@ -1127,7 +1128,7 @@ func (c *SessionController) reconcilePod(ctx context.Context, session *v1alpha1t
 					Name:      "wolf-runtime",
 					MountPath: "/tmp/.X11-unix",
 				},
-			}, wolfAgentVolumeMounts...),
+			}, wolfAgentVolumeMounts...)),
 		},
 		corev1.Container{
 			Name:  "pulseaudio",
@@ -1261,6 +1262,7 @@ func (c *SessionController) reconcilePod(ctx context.Context, session *v1alpha1t
 			Name:         "wolf-data",
 			VolumeSource: wolfDataVolumeSource,
 		},
+		udevVolume(),
 		// corev1.Volume{ //Needs to be changed into something more secure, without host path
 		// 	Name: "dev-input",
 		// 	VolumeSource: corev1.VolumeSource{
