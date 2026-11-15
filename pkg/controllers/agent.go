@@ -65,20 +65,6 @@ func (a *Agent) watchEvents(ctx context.Context) error {
 				klog.Infof("Event Comment: %v", ev.Comment)
 
 				switch wolfapi.WolfEventType(ev.Event) {
-				// Wolf handles a moonlight disconnect as a "Pause".
-				// When moonlight disconnects from Wolf we should reflect that
-				// into the state in Kubernetes so things can be cleaned up.
-				case wolfapi.PauseStreamEventType:
-					var pauseEvent wolfapi.PauseStreamEvent
-					if err := json.Unmarshal(ev.Data, &pauseEvent); err != nil {
-						utilruntime.HandleError(fmt.Errorf("failed to unmarshal pause stream event: %w", err))
-						continue
-					}
-
-					if err := a.WolfClient.StopSession(ctx, pauseEvent.SessionID); err != nil {
-						utilruntime.HandleError(fmt.Errorf("failed to stop session: %w", err))
-						continue
-					}
 				// Wolf hotplugged a virtual input device. Play the role of
 				// fake-udev: publish the udev db entry and broadcast a
 				// synthetic udev netlink event in the pod's network

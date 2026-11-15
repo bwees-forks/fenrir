@@ -63,10 +63,7 @@ func (c *SessionController) hasGameExited(ctx context.Context, session *v1alpha1
 // tearDownGame removes every session of the user's game along with its
 // Deployment, so the pod is not restarted or recreated by a lingering session.
 func (c *SessionController) tearDownGame(ctx context.Context, session *v1alpha1types.Session, ug userGame) error {
-	sessionNames := sets.New(session.Name)
-	if tracked, ok := c.trackedSessions[ug]; ok {
-		sessionNames = sessionNames.Union(tracked)
-	}
+	sessionNames := sets.New(c.tracker.Sessions(ug)...).Insert(session.Name)
 
 	for name := range sessionNames {
 		if err := c.SessionClient.Delete(ctx, name, metav1.DeleteOptions{}); err != nil && !errors.IsNotFound(err) {
@@ -74,13 +71,11 @@ func (c *SessionController) tearDownGame(ctx context.Context, session *v1alpha1t
 		}
 	}
 
-	deploymentName := c.deploymentName(session)
-	err := c.K8sClient.AppsV1().Deployments(session.Namespace).Delete(ctx, deploymentName, metav1.DeleteOptions{})
-	if err != nil && !errors.IsNotFound(err) {
-		return fmt.Errorf("failed to delete deployment %s/%s: %w", session.Namespace, deploymentName, err)
+	if err := c.deleteDeployment(ctx, session.Namespace, ug); err != nil {
+		return err
 	}
 
 	klog.Infof("Game %s for user %s exited, tore down %d session(s) and deployment %s",
-		ug.Game, ug.User, sessionNames.Len(), deploymentName)
+		ug.Game, ug.User, sessionNames.Len(), ug.deploymentName())
 	return nil
 }

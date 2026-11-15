@@ -38,6 +38,12 @@ import (
 //go:embed pin.html
 var pinHTML string
 
+const podPollInterval = 250 * time.Millisecond
+
+// gamePodShutdownTimeout covers the operator deleting the Deployment and the
+// pod's termination grace period, with room for a slow kubelet.
+const gamePodShutdownTimeout = 45 * time.Second
+
 type RESTServerOptions struct {
 	Port       int
 	SecurePort int
@@ -200,6 +206,7 @@ func (s *RESTServer) serverInfoHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		pods = slices.DeleteFunc(pods, func(pod *v1.Pod) bool { return pod.DeletionTimestamp != nil })
 		if len(pods) > 0 {
 			serverStatus = "SUNSHINE_SERVER_BUSY"
 
@@ -503,12 +510,10 @@ func (s *RESTServer) launchHandler(w http.ResponseWriter, r *http.Request) {
 	user := r.Context().Value(userContextKey{}).(*v1alpha1types.User)
 	pairing := r.Context().Value(pairingContextKey{}).(*v1alpha1types.Pairing)
 
-	//!TOOD: May want to wait here, since we need the Service to stop pointing
-	// at the old pod. It is very likely to happen before operator syncs and
-	// can create session, but perhaps should still check after operator returns
-	// the session URL.
-	if err := s.stopSessionsForUser(user, false); err != nil && !k8serrors.IsNotFound(err) {
-		writeErrorResponse(w, 500, fmt.Errorf("failed to stop existing sessions: %s", err))
+	// The new session must not see the old game pod: the operator would
+	// reuse its Deployment and the Service would route to it while it dies.
+	if stopErr := s.stopSessionsForUser(r.Context(), user); stopErr != nil {
+		writeErrorResponse(w, 500, fmt.Errorf("failed to stop existing sessions: %w", stopErr))
 		return
 	}
 
@@ -585,6 +590,11 @@ func (s *RESTServer) launchHandler(w http.ResponseWriter, r *http.Request) {
 		return true, nil
 	})
 	if err != nil {
+		// The client has given up, so drop the half-started game now
+		// instead of leaving it for the operator's reaper.
+		if delErr := s.SessionClient.Delete(context.WithoutCancel(r.Context()), session.Name, metav1.DeleteOptions{}); delErr != nil && !k8serrors.IsNotFound(delErr) {
+			klog.Errorf("failed to delete abandoned session %s: %s", session.Name, delErr)
+		}
 		writeErrorResponse(w, 500, fmt.Errorf("failed to launch app: %s", err))
 		return
 	}
@@ -599,59 +609,50 @@ func (s *RESTServer) launchHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *RESTServer) resumeHandler(w http.ResponseWriter, r *http.Request) {
-	// TODO: Wolf API current cannot support a "resume" to reuse the existing
-	// display/controllers. So we relaunch instead :(
+	// Wolf's API cannot hand a running session new AES keys, which a resume
+	// needs, so resuming restarts the game. See wolf's native rest resume().
 	s.launchHandler(w, r)
 }
 
 func (s *RESTServer) cancelHandler(w http.ResponseWriter, r *http.Request) {
 	user := r.Context().Value(userContextKey{}).(*v1alpha1types.User)
 
-	err := s.stopSessionsForUser(user, true)
-	if err != nil && !k8serrors.IsNotFound(err) {
+	if err := s.stopSessionsForUser(r.Context(), user); err != nil {
 		writeErrorResponse(w, 500, fmt.Errorf("failed to cancel session: %s", err))
 		return
 	}
 	sendXML(w, Response{StatusCode: 200})
 }
 
-func (s *RESTServer) stopSessionsForUser(user *v1alpha1types.User, shouldWait bool) error {
-	sessions, err := s.SessionLister.List(labels.SelectorFromSet(labels.Set{
-		"direwolf/user": user.Name,
-	}))
+// stopSessionsForUser deletes the user's sessions and waits until their game
+// pods are gone, including pods that were already shutting down.
+func (s *RESTServer) stopSessionsForUser(ctx context.Context, user *v1alpha1types.User) error {
+	userSelector := labels.SelectorFromSet(labels.Set{"direwolf/user": user.Name})
+
+	sessions, err := s.SessionLister.List(userSelector)
 	if err != nil {
 		return fmt.Errorf("failed to list sessions: %w", err)
 	}
 
-	didDelete := false
+	// Finish the deletes even if the client disconnects mid-request.
+	deleteCtx := context.WithoutCancel(ctx)
 	for _, session := range sessions {
-		if err := s.SessionClient.Delete(context.Background(), session.Name, metav1.DeleteOptions{}); err != nil {
-			return fmt.Errorf("failed to delete session: %w", err)
-		}
-		didDelete = true
-	}
-
-	if !didDelete {
-		klog.Warningf("Not stopping any sessions. No sessions found for user %s", user.Name)
-		return k8serrors.NewNotFound(v1alpha1types.Resource("session"), user.Name)
-	}
-
-	if shouldWait {
-		// Wait for pods to be cleaned up
-		err = wait.PollUntilContextTimeout(context.Background(), 250*time.Millisecond, 25*time.Second, true, func(ctx context.Context) (bool, error) {
-			pods, err := s.PodLister.List(labels.SelectorFromSet(labels.Set{
-				"direwolf/user": user.Name,
-			}))
-			if err != nil {
-				return false, err
-			}
-			return len(pods) == 0, nil
-		})
-		if err != nil {
-			return fmt.Errorf("failed to wait for pods to be cleaned up: %w", err)
+		deleteErr := s.SessionClient.Delete(deleteCtx, session.Name, metav1.DeleteOptions{})
+		if deleteErr != nil && !k8serrors.IsNotFound(deleteErr) {
+			return fmt.Errorf("failed to delete session: %w", deleteErr)
 		}
 	}
 
+	err = wait.PollUntilContextTimeout(ctx, podPollInterval, gamePodShutdownTimeout, true, func(context.Context) (bool, error) {
+		pods, listErr := s.PodLister.List(userSelector)
+		if listErr != nil {
+			return false, fmt.Errorf("failed to list game pods: %w", listErr)
+		}
+		return len(pods) == 0, nil
+	})
+	if err != nil {
+		return fmt.Errorf("failed to wait for game pods to stop: %w", err)
+	}
 	return nil
 }
 

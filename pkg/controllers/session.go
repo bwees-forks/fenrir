@@ -24,6 +24,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/util/sets"
 	appsv1ac "k8s.io/client-go/applyconfigurations/apps/v1"
@@ -41,9 +42,21 @@ import (
 // blocking its reconcile forever.
 const wolfAgentRequestTimeout = 10 * time.Second
 
-type userGame struct {
-	User string
-	Game string
+// sessionStartupDeadline is how long a Session may exist without a wolf
+// session before it is reaped. moonlight-proxy deletes sessions it gave up
+// on itself, so this only catches leftovers and must exceed its launch
+// timeout plus a cold image pull.
+const sessionStartupDeadline = 5 * time.Minute
+
+// gamePodTerminationGracePeriod keeps quitting fast. Games and wolf rarely
+// handle SIGTERM, so the 30s default is spent waiting for SIGKILL.
+const gamePodTerminationGracePeriod int64 = 5
+
+func sessionUserGame(session *v1alpha1types.Session) userGame {
+	return userGame{
+		Game: session.Spec.GameReference.Name,
+		User: session.Spec.UserReference.Name,
+	}
 }
 
 type SessionControllerOptions struct {
@@ -77,8 +90,7 @@ type SessionController struct {
 
 	K8sClient kubernetes.Interface
 
-	trackedSessions map[userGame]sets.Set[string]
-	trackedGames    map[string]userGame
+	tracker *sessionTracker
 
 	controller           generic.Controller[*v1alpha1types.Session]
 	deploymentController generic.Controller[*appsv1.Deployment]
@@ -105,8 +117,7 @@ func NewSessionController(
 		SessionInformer:          sessionInformer,
 		AppInformer:              appInformer,
 		UserInformer:             userInformer,
-		trackedSessions:          make(map[userGame]sets.Set[string]),
-		trackedGames:             make(map[string]userGame),
+		tracker:                  newSessionTracker(),
 		SessionControllerOptions: options,
 	}
 
@@ -155,17 +166,7 @@ func (c *SessionController) Run(ctx context.Context) error {
 	}
 
 	for _, session := range sessions {
-		ug := userGame{
-			Game: session.Spec.GameReference.Name,
-			User: session.Spec.UserReference.Name,
-		}
-		if existing, ok := c.trackedSessions[ug]; ok {
-			existing.Insert(session.Name)
-		} else {
-			c.trackedSessions[ug] = sets.New(session.Name)
-		}
-
-		c.trackedGames[session.Name] = ug
+		c.tracker.Track(session.Name, sessionUserGame(session))
 	}
 
 	go func() {
@@ -220,21 +221,9 @@ func (c *SessionController) Reconcile(namespace, name string, newObj *v1alpha1ty
 	defer klog.Infof("Finished Reconciling session %s/%s", namespace, name)
 
 	if newObj == nil {
-		// Session was deleted. Stuff will be garbage collected by Kubernetes
-		// due to owner references. Nothing to do.
-		if gam, ok := c.trackedGames[name]; ok {
-			if existing, ok := c.trackedSessions[gam]; ok {
-				existing.Delete(name)
-				if existing.Len() == 0 {
-					delete(c.trackedSessions, gam)
-				}
-			}
-
-			delete(c.trackedGames, name)
-		}
-		return nil
-	} else if newObj.Status.WolfSessionID == "" && newObj.CreationTimestamp.Add(1*time.Minute).Before(time.Now()) {
-		klog.Infof("Session %s/%s is older than 1 minute and has no wolf session ID, deleting", newObj.Namespace, newObj.Name)
+		return c.releaseGame(context.TODO(), namespace, name)
+	} else if newObj.Status.WolfSessionID == "" && newObj.CreationTimestamp.Add(sessionStartupDeadline).Before(time.Now()) {
+		klog.Infof("Session %s/%s has no wolf session after %s, deleting", newObj.Namespace, newObj.Name, sessionStartupDeadline)
 		err := c.SessionClient.Delete(context.TODO(), newObj.Name, metav1.DeleteOptions{})
 		if err != nil && !errors.IsNotFound(err) {
 			klog.Errorf("Failed to delete session %s/%s: %v", newObj.Namespace, newObj.Name, err)
@@ -242,22 +231,8 @@ func (c *SessionController) Reconcile(namespace, name string, newObj *v1alpha1ty
 		}
 		return nil
 	}
-	ug := userGame{
-		Game: newObj.Spec.GameReference.Name,
-		User: newObj.Spec.UserReference.Name,
-	}
-
-	if existing, ok := c.trackedSessions[ug]; ok {
-		existing.Insert(newObj.Name)
-	} else {
-		c.trackedSessions[ug] = sets.New(newObj.Name)
-	}
-	// Record the reverse mapping too: the deletion branch above relies on
-	// trackedGames to clean trackedSessions up. Without this, sessions created
-	// after startup are never removed from trackedSessions and every later
-	// reconcile of the same user/game spams "Failed to get session ... not
-	// found" while iterating the stale names.
-	c.trackedGames[newObj.Name] = ug
+	ug := sessionUserGame(newObj)
+	c.tracker.Track(newObj.Name, ug)
 
 	exited, err := c.hasGameExited(context.TODO(), newObj)
 	if err != nil {
@@ -709,59 +684,18 @@ func (c *SessionController) reconcilePod(ctx context.Context, session *v1alpha1t
 		return fmt.Errorf("failed to get user %s: %w", session.Spec.UserReference.Name, err)
 	}
 
-	ug := userGame{
-		Game: session.Spec.GameReference.Name,
-		User: session.Spec.UserReference.Name,
-	}
-
-	var owners []metav1.OwnerReference
-	var ownerApply []*metav1ac.OwnerReferenceApplyConfiguration
-	if sessions, ok := c.trackedSessions[ug]; ok {
-		for name := range sessions {
-			sess, err := c.SessionInformer.Namespaced(session.Namespace).Get(name)
-			if err != nil {
-				if errors.IsNotFound(err) {
-					// Stale entry left behind by an earlier missed cleanup:
-					// the Session object is gone, so drop it from tracking
-					// instead of logging an error forever.
-					sessions.Delete(name)
-					delete(c.trackedGames, name)
-					continue
-				}
-				klog.Errorf("Failed to get session %s/%s: %s", session.Namespace, name, err)
-				continue
-			}
-			owner := metav1.OwnerReference{
-				APIVersion: v1alpha1.GroupVersion.String(),
-				Kind:       "Session",
-				Name:       name,
-				UID:        sess.UID,
-				Controller: ptr.To(true),
-			}
-			owners = append(owners, owner)
-			ownerApply = append(ownerApply, metav1ac.OwnerReference().
-				WithName(name).
-				WithAPIVersion(v1alpha1.GroupVersion.String()).
-				WithKind("Session").
-				WithUID(session.UID).
-				WithController(true))
-		}
-	}
-
-	// If deployment already exists, just skip
 	deploymentName := c.deploymentName(session)
-	if _, err := c.deploymentController.Informer().Namespaced(session.Namespace).Get(deploymentName); err == nil {
-		klog.Infof("Deployment %s/%s already exists, just updating metadata", session.Namespace, deploymentName)
-		c.K8sClient.AppsV1().Deployments(session.Namespace).Apply(
-			context.Background(),
-			appsv1ac.Deployment(deploymentName, session.Namespace).
-				WithOwnerReferences(ownerApply...),
-			metav1.ApplyOptions{
-				FieldManager: "direwolf-session-controller-deployment-owners",
-			})
-
-		return nil
+	existing, err := c.deploymentController.Informer().Namespaced(session.Namespace).Get(deploymentName)
+	if err == nil {
+		if existing.DeletionTimestamp != nil {
+			return fmt.Errorf("waiting for previous deployment %s/%s to be deleted", session.Namespace, deploymentName)
+		}
+		return c.adoptDeployment(ctx, existing, sessionUserGame(session))
 	}
+	if !errors.IsNotFound(err) {
+		return fmt.Errorf("failed to get deployment: %w", err)
+	}
+	owners := []metav1.OwnerReference{sessionOwnerReference(session, true)}
 
 	// Create pod from pod template
 	app, err := c.AppInformer.Namespaced(session.Namespace).Get(session.Spec.GameReference.Name)
@@ -1025,6 +959,9 @@ func (c *SessionController) reconcilePod(ctx context.Context, session *v1alpha1t
 	// Apply HostIPC setting to the pod spec if requested by any sidecar policy
 	podToCreate.Spec.HostIPC = podHostIPC
 	c.GamePodScheduling.ApplyTo(&podToCreate.Spec)
+	if podToCreate.Spec.TerminationGracePeriodSeconds == nil {
+		podToCreate.Spec.TerminationGracePeriodSeconds = ptr.To(gamePodTerminationGracePeriod)
+	}
 
 	podToCreate.Spec.Containers = append(podToCreate.Spec.Containers,
 		corev1.Container{
@@ -1514,7 +1451,92 @@ func (c *SessionController) reconcilePVC(ctx context.Context, session *v1alpha1t
 	return nil
 }
 func (c *SessionController) deploymentName(session *v1alpha1types.Session) string {
-	return fmt.Sprintf("%s-%s", session.Spec.UserReference.Name, session.Spec.GameReference.Name)
+	return sessionUserGame(session).deploymentName()
+}
+
+func sessionOwnerReference(session *v1alpha1types.Session, controller bool) metav1.OwnerReference {
+	ref := metav1.OwnerReference{
+		APIVersion: v1alpha1.GroupVersion.String(),
+		Kind:       "Session",
+		Name:       session.Name,
+		UID:        session.UID,
+	}
+	if controller {
+		ref.Controller = ptr.To(true)
+	}
+	return ref
+}
+
+// adoptDeployment adds the game's other live sessions as owners of an
+// existing Deployment so it survives the session that created it. Only that
+// creator is the controller; Kubernetes rejects a second one.
+func (c *SessionController) adoptDeployment(ctx context.Context, deployment *appsv1.Deployment, ug userGame) error {
+	owned := sets.New[types.UID]()
+	controllerUID := types.UID("")
+	for _, ref := range deployment.OwnerReferences {
+		owned.Insert(ref.UID)
+		if ptr.Deref(ref.Controller, false) {
+			controllerUID = ref.UID
+		}
+	}
+
+	var owners []*metav1ac.OwnerReferenceApplyConfiguration
+	missingOwner := false
+	for _, name := range c.tracker.Sessions(ug) {
+		sess, err := c.SessionInformer.Namespaced(deployment.Namespace).Get(name)
+		if errors.IsNotFound(err) {
+			c.tracker.Untrack(name)
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("failed to get session %s/%s: %w", deployment.Namespace, name, err)
+		}
+		if sess.UID == controllerUID {
+			continue
+		}
+		missingOwner = missingOwner || !owned.Has(sess.UID)
+		ref := sessionOwnerReference(sess, false)
+		owners = append(owners, metav1ac.OwnerReference().
+			WithAPIVersion(ref.APIVersion).
+			WithKind(ref.Kind).
+			WithName(ref.Name).
+			WithUID(ref.UID))
+	}
+
+	if !missingOwner {
+		return nil
+	}
+
+	_, err := c.K8sClient.AppsV1().Deployments(deployment.Namespace).Apply(
+		ctx,
+		appsv1ac.Deployment(deployment.Name, deployment.Namespace).WithOwnerReferences(owners...),
+		metav1.ApplyOptions{FieldManager: "direwolf-session-controller-deployment-owners"},
+	)
+	if err != nil {
+		return fmt.Errorf("failed to add session owners to deployment %s/%s: %w", deployment.Namespace, deployment.Name, err)
+	}
+	return nil
+}
+
+// releaseGame deletes the game's Deployment as soon as its last session is
+// deleted, instead of waiting on the garbage collector's chain of deletes.
+func (c *SessionController) releaseGame(ctx context.Context, namespace, sessionName string) error {
+	ug, lastSession, found := c.tracker.Untrack(sessionName)
+	if !found || !lastSession {
+		return nil
+	}
+	return c.deleteDeployment(ctx, namespace, ug)
+}
+
+func (c *SessionController) deleteDeployment(ctx context.Context, namespace string, ug userGame) error {
+	name := ug.deploymentName()
+	err := c.K8sClient.AppsV1().Deployments(namespace).Delete(ctx, name, metav1.DeleteOptions{
+		PropagationPolicy: ptr.To(metav1.DeletePropagationBackground),
+	})
+	if err != nil && !errors.IsNotFound(err) {
+		return fmt.Errorf("failed to delete deployment %s/%s: %w", namespace, name, err)
+	}
+	return nil
 }
 
 func (c *SessionController) allocatePorts(
@@ -1541,6 +1563,18 @@ func (c *SessionController) allocatePorts(
 	return nil
 }
 
+// findWolfSession matches on the AES key and IV Moonlight generated for this
+// launch. Wolf reports its session ID in the client_id field.
+func findWolfSession(sessions []wolfapi.Session, config *v1alpha1types.SessionInfo) (wolfapi.Session, bool) {
+	want := util.Hash([]byte(config.AESKey), []byte(config.AESIV))
+	for _, s := range sessions {
+		if bytes.Equal(util.Hash([]byte(s.AESKey), []byte(s.AESIV)), want) {
+			return s, true
+		}
+	}
+	return wolfapi.Session{}, false
+}
+
 // reconcileActiveStreams calls out to wolf-agent on the running pod to ensure
 // that wolf is configured in the correct state and listening for streams on the
 // correct ports for each session trying to connect to the Pod.
@@ -1550,10 +1584,13 @@ func (c *SessionController) reconcileActiveStreams(
 ) error {
 	deploymentName := c.deploymentName(session)
 
-	// !TODO: Use informer for cache reads instead?
-	deployment, err := c.K8sClient.AppsV1().Deployments(session.Namespace).Get(ctx, deploymentName, metav1.GetOptions{})
+	deployment, err := c.deploymentController.Informer().Namespaced(session.Namespace).Get(deploymentName)
 	if err != nil {
 		return fmt.Errorf("failed to get deployment: %s", err)
+	}
+
+	if deployment.DeletionTimestamp != nil {
+		return fmt.Errorf("deployment %s/%s is being deleted", session.Namespace, deploymentName)
 	}
 
 	if deployment.Status.ObservedGeneration != deployment.Generation ||
@@ -1582,23 +1619,15 @@ func (c *SessionController) reconcileActiveStreams(
 		return fmt.Errorf("failed to list sessions: %s", err)
 	}
 
-	keyIVHash := util.Hash([]byte(session.Spec.Config.AESKey), []byte(session.Spec.Config.AESIV))
-	var found bool
-	for _, s := range sessions {
-		sHash := util.Hash([]byte(s.AESKey), []byte(s.AESIV))
-		if bytes.Equal(sHash, keyIVHash) {
-			found = true
-			break
-		}
-	}
-
-	if found != (session.Status.WolfSessionID != "") {
-		klog.Infof("Session %s/%s found: %v, status: %v", session.Namespace, session.Name, found, session.Status.WolfSessionID)
-		// Either the session was already added but not in the list, or
-		// the session was already in the list without being added.
-		//
-		// Either scenario is invalid. Delete the session
+	wolfSession, found := findWolfSession(sessions, &session.Spec.Config)
+	if !found && session.Status.WolfSessionID != "" {
+		klog.Infof("Wolf no longer has session %s for %s/%s, deleting", session.Status.WolfSessionID, session.Namespace, session.Name)
 		return c.SessionClient.Delete(ctx, session.Name, metav1.DeleteOptions{})
+	}
+	if found && session.Status.WolfSessionID == "" {
+		// The status write after an earlier AddSession was lost, usually to
+		// a conflict with a stale cached Session. Adopt the wolf session.
+		session.Status.WolfSessionID = wolfSession.ClientID
 	}
 	// Will need this for later
 	app, err := c.AppInformer.Namespaced(session.Namespace).Get(session.Spec.GameReference.Name)
