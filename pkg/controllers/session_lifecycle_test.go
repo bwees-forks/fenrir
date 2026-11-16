@@ -138,6 +138,24 @@ func TestAdoptDeploymentSkipsApplyWhenAllSessionsOwn(t *testing.T) {
 	assert.Empty(t, fakeK8s.Actions())
 }
 
+func TestFinalizeSessionReleasesSessionWithoutWolfStream(t *testing.T) {
+	session := testSession("quitting", "uid-quitting")
+	session.Finalizers = []string{v1alpha1types.SessionStreamFinalizer}
+	session.DeletionTimestamp = ptr.To(metav1.Now())
+
+	controller, _ := newTestController(t, nil, session)
+	sessions := controller.SessionClient
+
+	require.NoError(t, controller.finalizeSession(context.Background(), session))
+
+	got, err := sessions.Get(context.Background(), session.Name, metav1.GetOptions{})
+	if err == nil {
+		assert.NotContains(t, got.Finalizers, v1alpha1types.SessionStreamFinalizer)
+	} else {
+		assert.True(t, errors.IsNotFound(err), "unexpected error: %v", err)
+	}
+}
+
 func appliedDeployment(t *testing.T, fakeK8s *k8sfake.Clientset) appsv1.Deployment {
 	t.Helper()
 	for _, action := range fakeK8s.Actions() {

@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"reflect"
+	"slices"
 	"time"
 
 	"games-on-whales.github.io/direwolf/pkg/api/v1alpha1"
@@ -222,6 +224,8 @@ func (c *SessionController) Reconcile(namespace, name string, newObj *v1alpha1ty
 
 	if newObj == nil {
 		return c.releaseGame(context.TODO(), namespace, name)
+	} else if newObj.DeletionTimestamp != nil {
+		return c.finalizeSession(context.TODO(), newObj)
 	} else if newObj.Status.WolfSessionID == "" && newObj.CreationTimestamp.Add(sessionStartupDeadline).Before(time.Now()) {
 		klog.Infof("Session %s/%s has no wolf session after %s, deleting", newObj.Namespace, newObj.Name, sessionStartupDeadline)
 		err := c.SessionClient.Delete(context.TODO(), newObj.Name, metav1.DeleteOptions{})
@@ -1563,6 +1567,61 @@ func (c *SessionController) allocatePorts(
 	return nil
 }
 
+func newWolfClient(service *corev1.Service) wolfapi.Client {
+	return wolfapi.NewClient(fmt.Sprintf("https://%s:8443", service.Spec.ClusterIP), &http.Client{
+		Timeout: wolfAgentRequestTimeout,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		},
+	})
+}
+
+// finalizeSession ends the wolf stream while the game pod is still up. A
+// failed stop only costs a clean disconnect, so it never blocks the delete.
+func (c *SessionController) finalizeSession(ctx context.Context, session *v1alpha1types.Session) error {
+	if !slices.Contains(session.Finalizers, v1alpha1types.SessionStreamFinalizer) {
+		return nil
+	}
+	if err := c.stopWolfStream(ctx, session); err != nil {
+		klog.Errorf("Failed to stop wolf stream for %s/%s: %v", session.Namespace, session.Name, err)
+	}
+	return c.removeStreamFinalizer(ctx, session)
+}
+
+func (c *SessionController) stopWolfStream(ctx context.Context, session *v1alpha1types.Session) error {
+	if session.Status.WolfSessionID == "" {
+		return nil
+	}
+	service, err := c.K8sClient.CoreV1().Services(session.Namespace).Get(ctx, session.Status.ServiceName, metav1.GetOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to get service: %w", err)
+	}
+	if err := newWolfClient(service).StopSession(ctx, session.Status.WolfSessionID); err != nil {
+		return fmt.Errorf("failed to stop wolf session %s: %w", session.Status.WolfSessionID, err)
+	}
+	return nil
+}
+
+func (c *SessionController) removeStreamFinalizer(ctx context.Context, session *v1alpha1types.Session) error {
+	finalizers := slices.DeleteFunc(slices.Clone(session.Finalizers), func(f string) bool {
+		return f == v1alpha1types.SessionStreamFinalizer
+	})
+	patch, err := json.Marshal(map[string]any{
+		"metadata": map[string]any{
+			"finalizers":      finalizers,
+			"resourceVersion": session.ResourceVersion,
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("failed to build finalizer patch: %w", err)
+	}
+	_, err = c.SessionClient.Patch(ctx, session.Name, types.MergePatchType, patch, metav1.PatchOptions{})
+	if err != nil && !errors.IsNotFound(err) {
+		return fmt.Errorf("failed to remove finalizer from %s/%s: %w", session.Namespace, session.Name, err)
+	}
+	return nil
+}
+
 // findWolfSession matches on the AES key and IV Moonlight generated for this
 // launch. Wolf reports its session ID in the client_id field.
 func findWolfSession(sessions []wolfapi.Session, config *v1alpha1types.SessionInfo) (wolfapi.Session, bool) {
@@ -1598,22 +1657,16 @@ func (c *SessionController) reconcileActiveStreams(
 		return fmt.Errorf("deployment %s/%s not ready (Observed %d, Latest %d) (%d/%d)", session.Namespace, deploymentName, deployment.Status.ObservedGeneration, deployment.Generation, deployment.Status.ReadyReplicas, deployment.Status.Replicas)
 	}
 
-	// Get service for the deployment
 	service, err := c.K8sClient.CoreV1().Services(session.Namespace).Get(ctx, session.Status.ServiceName, metav1.GetOptions{})
 	if err != nil {
-		return fmt.Errorf("failed to get service: %s", err)
+		return fmt.Errorf("failed to get service: %w", err)
 	}
+	wolfclient := newWolfClient(service)
 
 	// List all the "sessions".
 	// Ensure they match each of our k8s sessions. Hash on AESKey/IV
 	// In the future it might make sense to just match on ClientID/ClientCertFingerprint
 	// but that is hardcoded for now :)
-	wolfclient := wolfapi.NewClient(fmt.Sprintf("https://%s:8443", service.Spec.ClusterIP), &http.Client{
-		Timeout: wolfAgentRequestTimeout,
-		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-		},
-	})
 	sessions, err := wolfclient.ListSessions(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to list sessions: %s", err)

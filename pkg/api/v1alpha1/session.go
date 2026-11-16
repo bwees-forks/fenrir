@@ -4,6 +4,10 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+// SessionStreamFinalizer holds a Session until the operator has told wolf to
+// end its stream, so Moonlight disconnects cleanly instead of timing out.
+const SessionStreamFinalizer = GroupName + "/stop-stream"
+
 // Represents a Session CRD.
 // +kubebuilder:object:root=true
 // +genclient

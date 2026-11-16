@@ -71,6 +71,8 @@ type RESTServer struct {
 
 	SessionClient v1alpha1client.SessionInterface
 
+	userLocks userLocks
+
 	RESTServerOptions
 }
 
@@ -510,6 +512,8 @@ func (s *RESTServer) launchHandler(w http.ResponseWriter, r *http.Request) {
 	user := r.Context().Value(userContextKey{}).(*v1alpha1types.User)
 	pairing := r.Context().Value(pairingContextKey{}).(*v1alpha1types.Pairing)
 
+	defer s.userLocks.Lock(user.Name)()
+
 	// The new session must not see the old game pod: the operator would
 	// reuse its Deployment and the Service would route to it while it dies.
 	if stopErr := s.stopSessionsForUser(r.Context(), user); stopErr != nil {
@@ -532,6 +536,7 @@ func (s *RESTServer) launchHandler(w http.ResponseWriter, r *http.Request) {
 				Annotations: map[string]string{
 					"direwolf/pairing": pairing.ObjectMeta.Name,
 				},
+				Finalizers: []string{v1alpha1types.SessionStreamFinalizer},
 			},
 			Spec: v1alpha1types.SessionSpec{
 				GameReference: v1alpha1types.GameReference{
@@ -616,6 +621,7 @@ func (s *RESTServer) resumeHandler(w http.ResponseWriter, r *http.Request) {
 
 func (s *RESTServer) cancelHandler(w http.ResponseWriter, r *http.Request) {
 	user := r.Context().Value(userContextKey{}).(*v1alpha1types.User)
+	defer s.userLocks.Lock(user.Name)()
 
 	if err := s.stopSessionsForUser(r.Context(), user); err != nil {
 		writeErrorResponse(w, 500, fmt.Errorf("failed to cancel session: %s", err))
