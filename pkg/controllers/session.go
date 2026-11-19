@@ -54,6 +54,10 @@ const sessionStartupDeadline = 5 * time.Minute
 // handle SIGTERM, so the 30s default is spent waiting for SIGKILL.
 const gamePodTerminationGracePeriod int64 = 5
 
+// The launch request waits on this probe, so the 10s default added up to 10s
+// to every launch after wolf was already up.
+const wolfAgentReadinessPeriodSeconds int32 = 1
+
 func sessionUserGame(session *v1alpha1types.Session) userGame {
 	return userGame{
 		Game: session.Spec.GameReference.Name,
@@ -1032,6 +1036,7 @@ func (c *SessionController) reconcilePod(ctx context.Context, session *v1alpha1t
 						Scheme: corev1.URISchemeHTTPS,
 					},
 				},
+				PeriodSeconds: wolfAgentReadinessPeriodSeconds,
 			},
 			LivenessProbe: &corev1.Probe{
 				ProbeHandler: corev1.ProbeHandler{
