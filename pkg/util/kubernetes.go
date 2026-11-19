@@ -13,6 +13,13 @@ import (
 	gateway "sigs.k8s.io/gateway-api/pkg/client/clientset/versioned"
 )
 
+// client-go defaults to 5 QPS, which throttled each session reconcile to
+// ~0.8s while a game pod started.
+const (
+	clientQPS   = 50
+	clientBurst = 100
+)
+
 func GetKubernetesClients() (
 	kubernetes.Interface,
 	direwolf.Interface,
@@ -33,6 +40,8 @@ func GetKubernetesClients() (
 	if err != nil {
 		return nil, nil, nil, nil, fmt.Errorf("error building kubeconfig: %w", err)
 	}
+	config.QPS = clientQPS
+	config.Burst = clientBurst
 
 	clientset, err := kubernetes.NewForConfig(config)
 	if err != nil {
